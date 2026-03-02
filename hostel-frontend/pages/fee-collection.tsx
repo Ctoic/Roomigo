@@ -64,8 +64,23 @@ interface FeeCollectionResponse {
   message?: string;
 }
 
-interface StudentsResponse {
-  students?: Student[];
+type QuickFeeStatus = 'not_paid' | 'paid';
+
+interface QuickCollectionStudent {
+  id: number;
+  name: string;
+  room_number: number;
+  monthly_fee: number;
+  collected_amount: number;
+  remaining_amount: number;
+  status: QuickFeeStatus;
+}
+
+interface QuickCollectionResponse {
+  success: boolean;
+  message?: string;
+  students?: QuickCollectionStudent[];
+  student?: QuickCollectionStudent;
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051';
@@ -74,9 +89,11 @@ export default function FeeCollection() {
   const { isAuthenticated, loading: authLoading } = useAuth();
   const router = useRouter();
   const [feeData, setFeeData] = useState<FeeData | null>(null);
-  const [students, setStudents] = useState<Student[]>([]);
+  const [quickStudents, setQuickStudents] = useState<QuickCollectionStudent[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [showQuickCollection, setShowQuickCollection] = useState(true);
+  const [quickUpdatingStudentId, setQuickUpdatingStudentId] = useState<number | null>(null);
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [formData, setFormData] = useState({
@@ -106,7 +123,7 @@ export default function FeeCollection() {
   useEffect(() => {
     if (isAuthenticated) {
       fetchFeeData();
-      fetchStudents();
+      fetchQuickStudents();
     }
   }, [isAuthenticated, selectedMonth, selectedYear]);
 
@@ -131,18 +148,52 @@ export default function FeeCollection() {
     }
   };
 
-  const fetchStudents = async () => {
+  const fetchQuickStudents = async () => {
     try {
-      const { data } = await axios.get<StudentsResponse>(
-        `${API_BASE_URL}/students`,
+      const { data } = await axios.get<QuickCollectionResponse>(
+        `${API_BASE_URL}/api/fees/quick-collection?month=${selectedMonth}&year=${selectedYear}`,
         {
           withCredentials: true,
         }
       );
-      setStudents(data.students ?? []);
+      setQuickStudents(data.students ?? []);
     } catch (error) {
-      console.error('Error fetching students:', error);
-      toast.error('Failed to fetch students');
+      console.error('Error fetching quick collection students:', error);
+      toast.error('Failed to fetch active students for quick collection');
+    }
+  };
+
+  const handleQuickStatusChange = async (studentId: number, status: QuickFeeStatus) => {
+    try {
+      setQuickUpdatingStudentId(studentId);
+      const { data } = await axios.post<QuickCollectionResponse>(
+        `${API_BASE_URL}/api/fees/quick-collection`,
+        {
+          student_id: studentId,
+          status,
+          month: selectedMonth,
+          year: selectedYear,
+        },
+        {
+          withCredentials: true,
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        }
+      );
+
+      if (data.success) {
+        toast.success(data.message || 'Fee status updated');
+        await Promise.all([fetchFeeData(), fetchQuickStudents()]);
+      } else {
+        toast.error(data.message || 'Failed to update fee status');
+      }
+    } catch (error: any) {
+      console.error('Error updating quick fee status:', error);
+      toast.error(error.response?.data?.message || 'Failed to update fee status');
+    } finally {
+      setQuickUpdatingStudentId(null);
     }
   };
 
@@ -170,8 +221,7 @@ export default function FeeCollection() {
       if (data.success) {
         toast.success(data.message || 'Fee recorded successfully');
         setIsModalOpen(false);
-        fetchFeeData();
-        fetchStudents();
+        await Promise.all([fetchFeeData(), fetchQuickStudents()]);
         resetForm();
       } else {
         toast.error(data.message || 'Failed to record fee payment');
@@ -226,9 +276,8 @@ export default function FeeCollection() {
     ],
   };
 
-  const unpaidStudents = students.filter((student) => student.fee_status !== 'paid');
-  const partiallyPaidStudents = students.filter((student) => student.fee_status === 'partial');
-  const fullyPaidStudents = students.filter((student) => student.fee_status === 'paid');
+  const unpaidStudents = quickStudents.filter((student) => student.status === 'not_paid');
+  const fullyPaidStudents = quickStudents.filter((student) => student.status === 'paid');
 
   return (
     <Layout>
@@ -284,6 +333,12 @@ export default function FeeCollection() {
             >
               Collect Fee
             </button>
+            <button
+              onClick={() => setShowQuickCollection((prev) => !prev)}
+              className="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-6 py-2.5 rounded-lg hover:from-blue-700 hover:to-blue-800 transform hover:scale-105 transition-all duration-200 font-medium shadow-lg hover:shadow-xl"
+            >
+              {showQuickCollection ? 'Hide Quick Collection' : 'Quick Collection'}
+            </button>
           </div>
         </div>
 
@@ -306,6 +361,84 @@ export default function FeeCollection() {
             <p className="text-3xl font-bold text-green-600">{fullyPaidStudents.length}</p>
           </div>
         </div>
+
+        {/* Quick Collection Table */}
+        {showQuickCollection && (
+          <div className="bg-white shadow rounded-lg overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-200">
+              <h3 className="text-lg font-medium text-gray-900">
+                Active Students Quick Collection ({months[selectedMonth - 1]?.label} {selectedYear})
+              </h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Student
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Room
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Monthly Fee
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Status
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Fee Collected
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Remaining
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {quickStudents.map((student) => (
+                    <tr key={student.id}>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm font-medium text-gray-900">{student.name}</div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900">Room {student.room_number}</div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900">Rs.{student.monthly_fee}</div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <select
+                          value={student.status}
+                          onChange={(e) => handleQuickStatusChange(student.id, e.target.value as QuickFeeStatus)}
+                          disabled={quickUpdatingStudentId === student.id}
+                          className="px-3 py-2 border border-border bg-surface text-foreground rounded-md focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                          <option value="not_paid">Not Paid</option>
+                          <option value="paid">Paid</option>
+                        </select>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className={`text-sm font-semibold ${student.status === 'paid' ? 'text-green-600' : 'text-red-600'}`}>
+                          Rs.{student.collected_amount}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm text-gray-900">Rs.{student.remaining_amount}</div>
+                      </td>
+                    </tr>
+                  ))}
+                  {quickStudents.length === 0 && (
+                    <tr>
+                      <td className="px-6 py-6 text-center text-sm text-gray-500" colSpan={6}>
+                        No active students found.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
 
         {/* Charts */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -409,9 +542,9 @@ export default function FeeCollection() {
                     required
                   >
                     <option value="">Select a student</option>
-                    {students.map((student) => (
+                    {quickStudents.map((student) => (
                       <option key={student.id} value={student.id}>
-                        {student.name} - Room {student.room_number} (Remaining: Rs.{student.remaining_fee})
+                        {student.name} - Room {student.room_number} (Remaining this month: Rs.{student.remaining_amount})
                       </option>
                     ))}
                   </select>

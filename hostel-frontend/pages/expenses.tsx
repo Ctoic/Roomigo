@@ -118,7 +118,7 @@ export default function Expenses() {
   const handleDownloadReport = async () => {
     try {
       const { data } = await axios.get<ArrayBuffer>(
-        `${API_BASE_URL}/export_pdf/${selectedYear}/${selectedMonth}`,
+        `${API_BASE_URL}/api/export_pdf/${selectedYear}/${selectedMonth}`,
         {
           withCredentials: true,
           responseType: 'arraybuffer'

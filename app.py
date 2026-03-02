@@ -58,6 +58,19 @@ def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def get_student_month_paid(student_id: int, year: int, month: int) -> float:
+    records = FeeRecord.query.filter(
+        FeeRecord.student_id == student_id,
+        extract("month", FeeRecord.date_paid) == month,
+        extract("year", FeeRecord.date_paid) == year,
+    ).all()
+    return float(sum(record.amount for record in records))
+
+
+def get_quick_fee_status(total_paid: float, monthly_fee: float) -> str:
+    return "paid" if total_paid >= monthly_fee else "not_paid"
+
+
 # -----------------------------
 # Application Factory
 # -----------------------------
@@ -93,6 +106,10 @@ def create_app(config_class: type = Config) -> Flask:
     @_login_manager.user_loader
     def load_user(user_id):
         return Admin.query.get(int(user_id))
+
+    @_login_manager.unauthorized_handler
+    def unauthorized():
+        return jsonify({"success": False, "message": "Authentication required"}), 401
 
     # Register blueprints
     app.register_blueprint(main_bp)
@@ -369,6 +386,45 @@ def api_rooms():
         return jsonify({"error": str(e)}), 500
 
 
+@rooms_bp.route("/rooms/availability")
+@login_required
+def api_rooms_availability():
+    try:
+        rooms = Room.query.all()
+        total_rooms = len(rooms)
+        available_rooms = 0
+        by_capacity = {}
+
+        for room in rooms:
+            capacity = int(room.capacity or 0)
+            current_occupancy = len(room.students) if room.students else 0
+            has_vacancy = current_occupancy < capacity
+            if has_vacancy:
+                available_rooms += 1
+
+            if capacity not in by_capacity:
+                by_capacity[capacity] = {"total": 0, "available": 0}
+            by_capacity[capacity]["total"] += 1
+            if has_vacancy:
+                by_capacity[capacity]["available"] += 1
+
+        rooms_by_type = [
+            {"type": f"{capacity}-seater", "total": data["total"], "available": data["available"]}
+            for capacity, data in sorted(by_capacity.items())
+        ]
+
+        return jsonify(
+            {
+                "rooms_total": total_rooms,
+                "rooms_available": available_rooms,
+                "rooms_occupied": total_rooms - available_rooms,
+                "rooms_by_type": rooms_by_type,
+            }
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 # -----------------------------
 # Blueprints: Expenses & Fees
 # -----------------------------
@@ -515,6 +571,7 @@ def api_expenses():
 
 
 @expenses_bp.route("/export_pdf/<int:year>/<int:month>")
+@login_required
 def export_pdf(year, month):
     try:
         expenses = Expense.query.filter(extract("year", Expense.date) == year, extract("month", Expense.date) == month).all()
@@ -650,6 +707,117 @@ def api_fees():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
+@fees_bp.route("/fees/quick-collection", methods=["GET", "POST"])
+@login_required
+def quick_fee_collection():
+    try:
+        if request.method == "GET":
+            month = request.args.get("month", datetime.now().month, type=int)
+            year = request.args.get("year", datetime.now().year, type=int)
+
+            if month < 1 or month > 12:
+                return jsonify({"success": False, "message": "Month must be between 1 and 12"}), 400
+
+            active_students = Student.query.filter_by(status="active").order_by(Student.name.asc()).all()
+            students_data = []
+            for student in active_students:
+                total_paid = get_student_month_paid(student.id, year, month)
+                students_data.append(
+                    {
+                        "id": student.id,
+                        "name": student.name,
+                        "room_number": student.room_number,
+                        "monthly_fee": float(student.fee),
+                        "collected_amount": float(total_paid),
+                        "remaining_amount": max(0.0, float(student.fee) - float(total_paid)),
+                        "status": get_quick_fee_status(total_paid, float(student.fee)),
+                    }
+                )
+
+            return jsonify(
+                {
+                    "success": True,
+                    "month": month,
+                    "year": year,
+                    "students": students_data,
+                }
+            )
+
+        data = request.get_json() or {}
+        student_id = data.get("student_id")
+        status = data.get("status")
+        month = int(data.get("month", datetime.now().month))
+        year = int(data.get("year", datetime.now().year))
+
+        if not student_id or status not in {"paid", "not_paid"}:
+            return jsonify({"success": False, "message": "student_id and valid status are required"}), 400
+        if month < 1 or month > 12:
+            return jsonify({"success": False, "message": "Month must be between 1 and 12"}), 400
+
+        student = Student.query.get_or_404(int(student_id))
+        if student.status != "active":
+            return jsonify({"success": False, "message": "Only active students can be updated"}), 400
+
+        month_records = FeeRecord.query.filter(
+            FeeRecord.student_id == student.id,
+            extract("month", FeeRecord.date_paid) == month,
+            extract("year", FeeRecord.date_paid) == year,
+        ).all()
+        total_paid = float(sum(record.amount for record in month_records))
+
+        if status == "paid":
+            amount_to_add = max(0.0, float(student.fee) - total_paid)
+            if amount_to_add > 0:
+                payment_date = datetime(year, month, 1).date()
+                db.session.add(
+                    FeeRecord(
+                        student_id=student.id,
+                        amount=amount_to_add,
+                        date_paid=payment_date,
+                        month_year=f"{year:04d}-{month:02d}",
+                        payment_method="cash",
+                    )
+                )
+                student.last_fee_payment = datetime.utcnow()
+        else:
+            for record in month_records:
+                db.session.delete(record)
+
+        current_month = datetime.now().month
+        current_year = datetime.now().year
+        if month == current_month and year == current_year:
+            current_month_total = get_student_month_paid(student.id, current_year, current_month)
+            if current_month_total >= student.fee:
+                student.fee_status = "paid"
+            elif current_month_total > 0:
+                student.fee_status = "partial"
+            else:
+                student.fee_status = "unpaid"
+
+        db.session.commit()
+
+        updated_total = get_student_month_paid(student.id, year, month)
+        return jsonify(
+            {
+                "success": True,
+                "message": "Fee status updated successfully",
+                "student": {
+                    "id": student.id,
+                    "name": student.name,
+                    "room_number": student.room_number,
+                    "monthly_fee": float(student.fee),
+                    "collected_amount": float(updated_total),
+                    "remaining_amount": max(0.0, float(student.fee) - float(updated_total)),
+                    "status": get_quick_fee_status(updated_total, float(student.fee)),
+                },
+            }
+        )
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 # -----------------------------
 # Blueprints: Students (API) & Legacy non-API routes
 # -----------------------------
@@ -659,6 +827,7 @@ legacy_bp = Blueprint("legacy", __name__)
 
 
 @students_api_bp.route("/students", methods=["GET", "POST"])
+@login_required
 def api_students():
     try:
         if request.method == "GET":
@@ -752,6 +921,7 @@ def api_students():
 
 
 @students_api_bp.route("/students/<int:student_id>", methods=["PUT", "DELETE"])
+@login_required
 def api_update_student(student_id):
     try:
         student = Student.query.get_or_404(student_id)
@@ -798,6 +968,7 @@ def api_update_student(student_id):
 
 # Legacy (non-API) routes preserved
 @legacy_bp.route("/students")
+@login_required
 def get_students():
     try:
         # Pagination for legacy endpoint
@@ -848,6 +1019,7 @@ def get_students():
 
 
 @legacy_bp.route("/enroll", methods=["POST"])
+@login_required
 def enroll_student():
     try:
         data = request.get_json()
@@ -1008,6 +1180,7 @@ def download_students_template():
         return jsonify({"success": False, "message": str(e)}), 500
         
 @legacy_bp.route("/collect-fee", methods=["POST"])
+@login_required
 def collect_fee():
     try:
         data = request.get_json()
@@ -1049,6 +1222,7 @@ def collect_fee():
 
 
 @legacy_bp.route("/fee-records")
+@login_required
 def get_fee_records():
     try:
         records = FeeRecord.query.all()
@@ -1085,6 +1259,7 @@ salaries_bp = Blueprint("salaries", __name__, url_prefix="/api")
 
 
 @employees_bp.route("/employees", methods=["GET"])
+@login_required
 def get_employees():
     try:
         employees = Employee.query.all()
@@ -1111,6 +1286,7 @@ def get_employees():
 
 
 @employees_bp.route("/employees", methods=["POST"])
+@login_required
 def add_employee():
     try:
         data = request.get_json()
@@ -1126,6 +1302,7 @@ def add_employee():
 
 
 @employees_bp.route("/employees/<int:employee_id>", methods=["PUT"])
+@login_required
 def update_employee(employee_id):
     try:
         employee = Employee.query.get_or_404(employee_id)
@@ -1146,6 +1323,7 @@ def update_employee(employee_id):
 
 
 @employees_bp.route("/employees/<int:employee_id>", methods=["DELETE"])
+@login_required
 def delete_employee(employee_id):
     try:
         employee = Employee.query.get_or_404(employee_id)
@@ -1161,6 +1339,7 @@ def delete_employee(employee_id):
 
 
 @salaries_bp.route("/employees/<int:employee_id>/salaries", methods=["GET"])
+@login_required
 def get_employee_salaries(employee_id):
     try:
         employee = Employee.query.get_or_404(employee_id)
@@ -1196,6 +1375,7 @@ def get_employee_salaries(employee_id):
 
 
 @salaries_bp.route("/employees/<int:employee_id>/salaries", methods=["POST"])
+@login_required
 def add_salary_payment(employee_id):
     try:
         employee = Employee.query.get_or_404(employee_id)
@@ -1235,6 +1415,7 @@ def add_salary_payment(employee_id):
 
 
 @salaries_bp.route("/salaries/<int:salary_id>", methods=["PUT"])
+@login_required
 def update_salary_payment(salary_id):
     try:
         salary_record = SalaryRecord.query.get_or_404(salary_id)
@@ -1253,6 +1434,7 @@ def update_salary_payment(salary_id):
 
 
 @salaries_bp.route("/salaries/<int:salary_id>", methods=["DELETE"])
+@login_required
 def delete_salary_payment(salary_id):
     try:
         salary_record = SalaryRecord.query.get_or_404(salary_id)
@@ -1271,6 +1453,7 @@ def delete_salary_payment(salary_id):
 
 
 @salaries_bp.route("/salaries/summary/<month_year>", methods=["GET"])
+@login_required
 def get_monthly_salary_summary(month_year):
     try:
         salary_records = SalaryRecord.query.filter_by(month_year=month_year).all()
@@ -1303,6 +1486,7 @@ def get_monthly_salary_summary(month_year):
 
 
 @salaries_bp.route("/salaries/yearly-summary/<int:year>", methods=["GET"])
+@login_required
 def get_yearly_salary_summary(year):
     try:
         salary_records = SalaryRecord.query.filter(SalaryRecord.month_year.like(f"{year}-%")).all()
@@ -1343,6 +1527,7 @@ def get_yearly_salary_summary(year):
 
 
 @salaries_bp.route("/salaries/available-months", methods=["GET"])
+@login_required
 def get_available_salary_months():
     try:
         month_years = (
