@@ -86,10 +86,16 @@ export default function Registrations() {
       setLoadingData(true);
       const response = await apiFetch(`/api/admin/registrations?page=${currentPage}&status=${statusFilter}`);
       const data = await response.json();
-      setRegistrations(data.registrations);
-      setTotalPages(data.meta.total_pages);
+      if (!response.ok) {
+        throw new Error(data.message || 'Failed to fetch registrations');
+      }
+
+      setRegistrations(Array.isArray(data.registrations) ? data.registrations : []);
+      setTotalPages(typeof data.meta?.total_pages === 'number' ? data.meta.total_pages : 1);
     } catch (error) {
       console.error('Error fetching registrations:', error);
+      setRegistrations([]);
+      setTotalPages(1);
     } finally {
       setLoadingData(false);
     }
@@ -99,9 +105,13 @@ export default function Registrations() {
     try {
       const response = await apiFetch('/api/admin/registrations/stats');
       const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || 'Failed to fetch registration stats');
+      }
       setStats(data);
     } catch (error) {
       console.error('Error fetching stats:', error);
+      setStats(null);
     }
   };
 
@@ -154,21 +164,22 @@ export default function Registrations() {
       rejected: { color: 'bg-red-100 text-red-800', icon: XCircle },
     };
     
-    const config = statusConfig[status as keyof typeof statusConfig];
+    const safeStatus = status in statusConfig ? status : 'pending';
+    const config = statusConfig[safeStatus as keyof typeof statusConfig];
     const Icon = config.icon;
     
     return (
       <Badge className={`${config.color} flex items-center gap-1`}>
         <Icon className="h-3 w-3" />
-        {status.charAt(0).toUpperCase() + status.slice(1)}
+        {safeStatus.charAt(0).toUpperCase() + safeStatus.slice(1)}
       </Badge>
     );
   };
 
   const filteredRegistrations = registrations.filter(reg =>
-    reg.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    reg.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    reg.university.toLowerCase().includes(searchTerm.toLowerCase())
+    (reg.name ?? '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (reg.email ?? '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (reg.university ?? '').toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   if (loading) {
