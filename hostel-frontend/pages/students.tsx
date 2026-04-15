@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import Layout from '@/components/Layout';
 import { useAuth } from '@/context/AuthContext';
+import { apiClient, buildApiUrl } from '@/lib/api';
 import { useRouter } from 'next/router';
-import axios from 'axios';
 import toast from 'react-hot-toast';
 
 interface Student {
@@ -78,13 +78,9 @@ export default function Students() {
     }
     setError(null);
     try {
-      const response = await axios.get<StudentsResponse>(
-        `${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/students`,
-        {
-          withCredentials: true,
-          params: { page, per_page: perPage },
-        }
-      );
+      const response = await apiClient.get<StudentsResponse>('/api/students', {
+        params: { page, per_page: perPage },
+      });
 
       const data = response.data;
       if (data.error) {
@@ -119,9 +115,7 @@ export default function Students() {
 
   const fetchRooms = async () => {
     try {
-      const response = await axios.get<{rooms?: any[], error?: string}>(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/rooms`, {
-        withCredentials: true
-      });
+      const response = await apiClient.get<{rooms?: any[], error?: string}>('/api/rooms');
       
       if (response.data.error) {
         throw new Error(response.data.error);
@@ -147,9 +141,7 @@ export default function Students() {
           room_id: parseInt(formData.room_id)
         };
         
-        await axios.put(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/students/${selectedStudent.id}`, updateData, {
-          withCredentials: true
-        });
+        await apiClient.put(`/api/students/${selectedStudent.id}`, updateData);
         toast.success('Student updated successfully');
       } else {
         // Add new student
@@ -159,9 +151,7 @@ export default function Students() {
           room_id: parseInt(formData.room_id)
         };
         
-        await axios.post(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/students`, newStudentData, {
-          withCredentials: true
-        });
+        await apiClient.post('/api/students', newStudentData);
         toast.success('Student enrolled successfully');
       }
       setIsModalOpen(false);
@@ -177,9 +167,7 @@ export default function Students() {
   const handleDelete = async (id: number) => {
     if (window.confirm('Are you sure you want to delete this student? This will also delete all associated fee records.')) {
       try {
-        await axios.delete(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/students/${id}`, {
-          withCredentials: true
-        });
+        await apiClient.delete(`/api/students/${id}`);
         toast.success('Student deleted successfully');
         // If we just deleted the last item on the page, move back a page on next fetch
         if (students.length === 1 && page > 1) {
@@ -233,8 +221,7 @@ export default function Students() {
       const formData = new FormData();
       formData.append('file', uploadFile);
 
-      const response = await axios.post(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/students/bulk-upload`, formData, {
-        withCredentials: true,
+      const response = await apiClient.post('/api/students/bulk-upload', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
@@ -262,8 +249,7 @@ export default function Students() {
 
   const downloadTemplate = async () => {
     try {
-      const response = await axios.get(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/students/download-template`, {
-        withCredentials: true,
+      const response = await apiClient.get('/api/students/download-template', {
         responseType: 'blob',
       });
 
@@ -397,7 +383,7 @@ export default function Students() {
                           {student.picture ? (
                             <img
                               className="h-10 w-10 rounded-full object-cover"
-                              src={`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/static/uploads/${student.picture}`}
+                              src={buildApiUrl(`/static/uploads/${student.picture}`)}
                               alt={student.name || 'Student'}
                               onError={(e) => {
                                 const target = e.target as HTMLImageElement;

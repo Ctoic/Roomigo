@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import Layout from '@/components/Layout';
 import { useAuth } from '@/context/AuthContext';
+import { apiClient } from '@/lib/api';
 import { useRouter } from 'next/router';
-import axios from 'axios';
 import toast from 'react-hot-toast';
 import { Line, Bar } from 'react-chartjs-2';
 import {
@@ -83,8 +83,6 @@ interface QuickCollectionResponse {
   student?: QuickCollectionStudent;
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051';
-
 export default function FeeCollection() {
   const { isAuthenticated, loading: authLoading } = useAuth();
   const router = useRouter();
@@ -130,15 +128,7 @@ export default function FeeCollection() {
   const fetchFeeData = async () => {
     try {
       setIsLoading(true);
-      const { data } = await axios.get<FeeData>(
-        `${API_BASE_URL}/api/fees?month=${selectedMonth}&year=${selectedYear}`,
-        {
-          withCredentials: true,
-          headers: {
-            Accept: 'application/json',
-          },
-        }
-      );
+      const { data } = await apiClient.get<FeeData>(`/api/fees?month=${selectedMonth}&year=${selectedYear}`);
       setFeeData(data ?? null);
     } catch (error) {
       console.error('Error fetching fee data:', error);
@@ -150,12 +140,7 @@ export default function FeeCollection() {
 
   const fetchQuickStudents = async () => {
     try {
-      const { data } = await axios.get<QuickCollectionResponse>(
-        `${API_BASE_URL}/api/fees/quick-collection?month=${selectedMonth}&year=${selectedYear}`,
-        {
-          withCredentials: true,
-        }
-      );
+      const { data } = await apiClient.get<QuickCollectionResponse>(`/api/fees/quick-collection?month=${selectedMonth}&year=${selectedYear}`);
       setQuickStudents(data.students ?? []);
     } catch (error) {
       console.error('Error fetching quick collection students:', error);
@@ -166,22 +151,12 @@ export default function FeeCollection() {
   const handleQuickStatusChange = async (studentId: number, status: QuickFeeStatus) => {
     try {
       setQuickUpdatingStudentId(studentId);
-      const { data } = await axios.post<QuickCollectionResponse>(
-        `${API_BASE_URL}/api/fees/quick-collection`,
-        {
-          student_id: studentId,
-          status,
-          month: selectedMonth,
-          year: selectedYear,
-        },
-        {
-          withCredentials: true,
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-        }
-      );
+      const { data } = await apiClient.post<QuickCollectionResponse>('/api/fees/quick-collection', {
+        student_id: studentId,
+        status,
+        month: selectedMonth,
+        year: selectedYear,
+      });
 
       if (data.success) {
         toast.success(data.message || 'Fee status updated');
@@ -206,17 +181,7 @@ export default function FeeCollection() {
         date: formData.date
       };
 
-      const { data } = await axios.post<FeeCollectionResponse>(
-        `${API_BASE_URL}/collect-fee`,
-        formattedData,
-        {
-          withCredentials: true,
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-        }
-      );
+      const { data } = await apiClient.post<FeeCollectionResponse>('/collect-fee', formattedData);
 
       if (data.success) {
         toast.success(data.message || 'Fee recorded successfully');

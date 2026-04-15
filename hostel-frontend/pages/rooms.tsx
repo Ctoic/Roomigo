@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import Layout from '@/components/Layout';
 import { useAuth } from '@/context/AuthContext';
+import { apiClient, buildApiUrl } from '@/lib/api';
 import { useRouter } from 'next/router';
-import axios from 'axios';
 
 interface Room {
   id: number;
@@ -21,8 +21,6 @@ interface RoomsResponse {
   message?: string;
   rooms?: Room[];
 }
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051';
 
 export default function Rooms() {
   const { isAuthenticated, loading } = useAuth();
@@ -45,19 +43,15 @@ export default function Rooms() {
 
   const fetchRooms = async () => {
     setIsLoading(true);
-    setError(null);
+      setError(null);
     try {
-      const { data } = await axios.get<RoomsResponse>(`${API_BASE_URL}/api/rooms`, {
-        withCredentials: true,
-      });
-      console.log('Rooms API Response:', data);
+      const { data } = await apiClient.get<RoomsResponse>('/api/rooms');
 
       if (data?.error) {
         throw new Error(data.error);
       }
       
       let roomsData = data?.rooms || [];
-      console.log('Processed rooms data:', roomsData);
       
       if (!Array.isArray(roomsData)) {
         console.error('Rooms data is not an array:', roomsData);
@@ -95,7 +89,7 @@ export default function Rooms() {
     if (!picture) {
       return '/default-avatar.png';
     }
-    return `${API_BASE_URL}/static/uploads/${picture}`;
+    return buildApiUrl(`/static/uploads/${picture}`);
   };
 
   if (loading || isLoading) {

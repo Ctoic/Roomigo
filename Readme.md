@@ -27,9 +27,9 @@ Roomigo is a full-stack hostel management platform for day-to-day operations:
 ```
 
 ## Architecture Overview
-- Frontend (`hostel-frontend`) calls backend APIs using cookie-based auth sessions.
+- Frontend (`hostel-frontend`) calls backend APIs using bearer-token auth.
 - Backend exposes auth endpoints at root (`/login`, `/check-auth`, `/logout`) and feature APIs under `/api/*`.
-- Database is initialized through migrations, while `bootstrap_data()` seeds default rooms and initial employees.
+- Database schema is managed through Alembic migrations, while `bootstrap_data()` seeds default rooms and initial employees when explicitly invoked.
 - Uploaded assets are stored in `static/uploads` (mounted to Docker volume in containerized setup).
 
 ## Quick Start (Docker)
@@ -65,6 +65,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 flask db upgrade
+flask --app app:create_app seed-data
 python app.py
 ```
 
@@ -79,22 +80,61 @@ npm run dev
 Create a `.env` in project root (or export in shell):
 
 ```env
-SECRET_KEY=change-me
-WTF_CSRF_SECRET_KEY=change-me-too
+SECRET_KEY=replace-with-a-long-random-secret
 DATABASE_URL=sqlite:///hostel.db
 UPLOAD_FOLDER=static/uploads
+RUN_SEED_DATA=true
+CORS_ORIGINS=http://localhost:3000
 NEXT_PUBLIC_API_BASE_URL=http://localhost:5051
 ```
 
 Notes:
 - In Docker, `DATABASE_URL` defaults to `sqlite:////data/hostel.db`.
 - Frontend code uses `NEXT_PUBLIC_API_BASE_URL` (not `NEXT_PUBLIC_API_URL`).
+- For production, set `RUN_SEED_DATA=false` after the initial seed.
+- For split-origin deployments, set `CORS_ORIGINS` to the exact frontend URL(s), separated by commas.
 
 ## Database Bootstrap Behavior
 - `bootstrap_data()` creates default rooms `1-14` with capacity `3`.
 - `bootstrap_data()` creates default rooms `15-18` with capacity `4`.
 - It also seeds initial employee records.
 - It does not create an initial admin account.
+- In production, run it with `flask --app app:create_app seed-data` instead of relying on app startup.
+
+## Deployment
+
+### Railway backend
+Set these Railway variables:
+
+```env
+FLASK_ENV=production
+SECRET_KEY=<long-random-secret>
+DATABASE_URL=<railway-postgres-url>
+CORS_ORIGINS=https://your-site.netlify.app
+RUN_SEED_DATA=false
+```
+
+Use this start command:
+
+```bash
+gunicorn 'app:create_app()'
+```
+
+Run these one-off commands after the first deploy:
+
+```bash
+flask --app app:create_app db upgrade
+flask --app app:create_app seed-data
+```
+
+### Netlify frontend
+Set the Netlify base directory to `hostel-frontend` and add:
+
+```env
+NEXT_PUBLIC_API_BASE_URL=https://your-backend.up.railway.app
+```
+
+The frontend now uses bearer tokens, so it does not depend on cross-site cookies.
 
 ## Create Admin User (manual)
 Use a Python shell and insert an `Admin` with a bcrypt hash:
@@ -127,7 +167,7 @@ Class, component, and sequence UML diagrams are available at:
 - [`docs/UML_DIAGRAMS.md`](docs/UML_DIAGRAMS.md)
 
 ## Key API Areas
-- Authentication: session-based login/logout/auth-check
+- Authentication: bearer-token login/logout/auth-check
 - Dashboard analytics
 - Rooms and occupancy
 - Students (CRUD + bulk upload + template download)

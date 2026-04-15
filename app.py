@@ -1,9 +1,14 @@
 import os
+import time
+from collections import defaultdict, deque
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 from calendar import month_name
+from functools import wraps
+from typing import Optional
+from urllib.parse import urlparse
 
-from flask import Flask, jsonify, request, send_file, Blueprint
+from flask import Flask, jsonify, request, send_file, Blueprint, current_app
 from flask_cors import CORS
 from flask_login import (
     LoginManager,
@@ -15,9 +20,11 @@ from flask_login import (
 from flask_bcrypt import Bcrypt
 from flask_migrate import Migrate
 from flask_wtf.csrf import generate_csrf
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from sqlalchemy import extract
+from werkzeug.middleware.proxy_fix import ProxyFix
 import pandas as pd
 
 # Models / DB
@@ -38,19 +45,55 @@ from models import (
 # Configuration & Extensions
 # -----------------------------
 
+
+def _get_env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_cors_origins() -> list[str]:
+    raw_origins = os.environ.get("CORS_ORIGINS")
+    if raw_origins:
+        return [origin.strip().rstrip("/") for origin in raw_origins.split(",") if origin.strip()]
+    return [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:3002",
+    ]
+
+
+def _origin_uses_https(origin: str) -> bool:
+    return urlparse(origin).scheme == "https"
+
 class Config:
-    SECRET_KEY = os.environ.get("SECRET_KEY", "your_secret_key")
+    FLASK_ENV = os.environ.get("FLASK_ENV", "development")
+    SECRET_KEY = os.environ.get("SECRET_KEY") or ("dev-secret-key" if FLASK_ENV != "production" else None)
     SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL", "sqlite:///hostel.db")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", "static/uploads")
-    PERMANENT_SESSION_LIFETIME = 1800  # 30 minutes
-    WTF_CSRF_ENABLED = False
-    WTF_CSRF_SECRET_KEY = os.environ.get("WTF_CSRF_SECRET_KEY", "your_csrf_secret_key")
+    PERMANENT_SESSION_LIFETIME = timedelta(minutes=int(os.environ.get("SESSION_LIFETIME_MINUTES", "30")))
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SECURE = _get_env_bool("SESSION_COOKIE_SECURE", FLASK_ENV == "production")
+    SESSION_COOKIE_SAMESITE = os.environ.get(
+        "SESSION_COOKIE_SAMESITE",
+        "None" if SESSION_COOKIE_SECURE else "Lax",
+    )
+    REMEMBER_COOKIE_SECURE = SESSION_COOKIE_SECURE
+    MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH_MB", "5")) * 1024 * 1024
+    AUTH_TOKEN_TTL_SECONDS = int(os.environ.get("AUTH_TOKEN_TTL_SECONDS", str(60 * 60 * 12)))
+    LOGIN_RATE_LIMIT = int(os.environ.get("LOGIN_RATE_LIMIT", "10"))
+    REGISTRATION_RATE_LIMIT = int(os.environ.get("REGISTRATION_RATE_LIMIT", "20"))
+    RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "300"))
+    RUN_SEED_DATA = _get_env_bool("RUN_SEED_DATA", FLASK_ENV != "production")
+    CORS_ORIGINS = _get_cors_origins()
 
 # Initialize extensions once (application-factory friendly)
 _bcrypt = Bcrypt()
 _login_manager = LoginManager()
 _migrate = Migrate()
+_rate_limit_store: dict[str, deque[float]] = defaultdict(deque)
 
 
 def allowed_file(filename: str) -> bool:
@@ -71,6 +114,72 @@ def get_quick_fee_status(total_paid: float, monthly_fee: float) -> str:
     return "paid" if total_paid >= monthly_fee else "not_paid"
 
 
+def _user_payload(admin: Admin) -> dict:
+    return {
+        "id": admin.id,
+        "name": admin.name,
+        "email": admin.email,
+        "username": admin.username,
+    }
+
+
+def _get_auth_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(current_app.config["SECRET_KEY"], salt="roomigo-auth-token")
+
+
+def generate_auth_token(admin: Admin) -> str:
+    serializer = _get_auth_serializer()
+    return serializer.dumps({"admin_id": admin.id, "password_hash": admin.password_hash})
+
+
+def verify_auth_token(token: str) -> Optional[Admin]:
+    serializer = _get_auth_serializer()
+    try:
+        data = serializer.loads(token, max_age=current_app.config["AUTH_TOKEN_TTL_SECONDS"])
+    except (BadSignature, SignatureExpired):
+        return None
+
+    admin = db.session.get(Admin, int(data.get("admin_id", 0)))
+    if not admin or admin.password_hash != data.get("password_hash"):
+        return None
+    return admin
+
+
+def get_request_identity() -> str:
+    forwarded_for = request.headers.get("X-Forwarded-For", "")
+    return forwarded_for.split(",")[0].strip() if forwarded_for else request.remote_addr or "unknown"
+
+
+def rate_limit(scope: str, config_key: str):
+    def decorator(func):
+        @wraps(func)
+        def wrapped(*args, **kwargs):
+            limit = current_app.config[config_key]
+            window = current_app.config["RATE_LIMIT_WINDOW_SECONDS"]
+            key = f"{scope}:{get_request_identity()}"
+            now = time.time()
+            bucket = _rate_limit_store[key]
+
+            while bucket and now - bucket[0] >= window:
+                bucket.popleft()
+
+            if len(bucket) >= limit:
+                return jsonify({"success": False, "message": "Too many requests. Please try again later."}), 429
+
+            bucket.append(now)
+            return func(*args, **kwargs)
+
+        return wrapped
+
+    return decorator
+
+
+def error_response(message: str, status_code: int = 500, exc: Optional[Exception] = None):
+    if exc is not None:
+        current_app.logger.exception(message)
+    return jsonify({"success": False, "message": message}), status_code
+
+
 # -----------------------------
 # Application Factory
 # -----------------------------
@@ -78,40 +187,63 @@ def get_quick_fee_status(total_paid: float, monthly_fee: float) -> str:
 def create_app(config_class: type = Config) -> Flask:
     app = Flask(__name__)
     app.config.from_object(config_class)
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-    # CORS (kept behavior but centralized here)
+    if not app.config.get("SECRET_KEY"):
+        raise RuntimeError("SECRET_KEY must be set before starting the application.")
+
+    if app.config["SESSION_COOKIE_SAMESITE"].lower() == "none" and not app.config["SESSION_COOKIE_SECURE"]:
+        raise RuntimeError("SESSION_COOKIE_SECURE must be true when SESSION_COOKIE_SAMESITE is 'None'.")
+
+    if app.config["FLASK_ENV"] == "production":
+        insecure_origins = [origin for origin in app.config["CORS_ORIGINS"] if not _origin_uses_https(origin)]
+        if insecure_origins:
+            raise RuntimeError("Production CORS_ORIGINS must use https.")
+
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+
     CORS(
         app,
-        origins=["http://localhost:3000", "http://localhost:3001", "http://localhost:3002"],
-        supports_credentials=True,
+        origins=app.config["CORS_ORIGINS"],
+        supports_credentials=False,
         methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=[
             "Content-Type",
             "Authorization",
             "X-Requested-With",
-            "X-CSRF-Token",
-            "X-CSRFToken",
         ],
-        expose_headers=["Content-Type", "X-CSRF-Token", "X-CSRFToken"],
-        credentials=True,
+        expose_headers=["Content-Type"],
     )
 
-    # Init extensions
     db.init_app(app)
     _bcrypt.init_app(app)
     _login_manager.init_app(app)
     _migrate.init_app(app, db)
     _login_manager.login_view = "auth.api_login"
+    _login_manager.session_protection = "strong"
 
     @_login_manager.user_loader
     def load_user(user_id):
-        return Admin.query.get(int(user_id))
+        return db.session.get(Admin, int(user_id))
+
+    @_login_manager.request_loader
+    def load_user_from_request(req):
+        auth_header = req.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return None
+        return verify_auth_token(auth_header.removeprefix("Bearer ").strip())
 
     @_login_manager.unauthorized_handler
     def unauthorized():
         return jsonify({"success": False, "message": "Authentication required"}), 401
 
-    # Register blueprints
+    @app.after_request
+    def add_security_headers(response):
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
+
     app.register_blueprint(main_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(dashboard_bp)
@@ -124,16 +256,24 @@ def create_app(config_class: type = Config) -> Flask:
     app.register_blueprint(salaries_bp)
     app.register_blueprint(registration_bp)
 
-    # Basic JSON error handlers (optional best-practice)
     @app.errorhandler(404)
     def not_found(_):
         return jsonify({"success": False, "message": "Not found"}), 404
 
     @app.errorhandler(500)
     def server_error(e):
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Internal server error", 500, e)
 
-    if not os.environ.get("FLASK_SKIP_BOOTSTRAP"):
+    @app.errorhandler(413)
+    def file_too_large(_):
+        return jsonify({"success": False, "message": "Uploaded file is too large"}), 413
+
+    @app.cli.command("seed-data")
+    def seed_data_command():
+        bootstrap_data()
+        print("Seed data applied.")
+
+    if app.config["RUN_SEED_DATA"]:
         with app.app_context():
             bootstrap_data()
 
@@ -145,8 +285,7 @@ def create_app(config_class: type = Config) -> Flask:
 # -----------------------------
 
 def bootstrap_data():
-    """Create initial tables, rooms, and employees (idempotent)."""
-    db.create_all()
+    """Seed initial rooms and employees after migrations have been applied."""
 
     # Create 14 rooms with 3 seats (rooms 1-14)
     for i in range(1, 15):
@@ -191,38 +330,42 @@ def test():
 
 @main_bp.route("/health")
 def health():
-    return jsonify({"status": "healthy", "message": "Server is running on port 5051"})
+    return jsonify({"status": "healthy"})
 
 
 @main_bp.route("/api/csrf-token")
 def get_csrf_token():
-    return jsonify({"csrf_token": generate_csrf()})
+    return jsonify({"csrf_token": generate_csrf(), "message": "Bearer token auth is enabled."})
 
 
 @auth_bp.route("/login", methods=["POST"])
+@rate_limit("login", "LOGIN_RATE_LIMIT")
 def api_login():
     try:
-        data = request.get_json()
-        admin = Admin.query.filter_by(username=data["username"]).first()
+        data = request.get_json(silent=True) or {}
+        username = str(data.get("username", "")).strip()
+        password = data.get("password", "")
 
-        if admin and _bcrypt.check_password_hash(admin.password_hash, data["password"]):
+        if not username or not password:
+            return jsonify({"success": False, "message": "Username and password are required"}), 400
+
+        admin = Admin.query.filter_by(username=username).first()
+
+        if admin and _bcrypt.check_password_hash(admin.password_hash, password):
             login_user(admin)
+            token = generate_auth_token(admin)
             return jsonify(
                 {
                     "success": True,
-                    "user": {
-                        "id": admin.id,
-                        "name": admin.name,
-                        "email": admin.email,
-                        "username": admin.username,
-                    },
+                    "user": _user_payload(admin),
+                    "token": token,
+                    "expires_in": current_app.config["AUTH_TOKEN_TTL_SECONDS"],
                 }
             )
-        else:
-            return jsonify({"success": False, "message": "Invalid credentials"}), 401
+        return jsonify({"success": False, "message": "Invalid credentials"}), 401
 
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Login failed", 500, e)
 
 
 @auth_bp.route("/check-auth")
@@ -231,12 +374,7 @@ def check_auth():
         return jsonify(
             {
                 "success": True,
-                "user": {
-                    "id": current_user.id,
-                    "name": current_user.name,
-                    "email": current_user.email,
-                    "username": current_user.username,
-                },
+                "user": _user_payload(current_user),
             }
         )
     return jsonify({"success": False, "message": "Not authenticated"}), 401
@@ -347,7 +485,7 @@ def api_dashboard():
             }
         )
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return error_response("Failed to load dashboard data", 500, e)
 
 
 @rooms_bp.route("/rooms")
@@ -377,13 +515,12 @@ def api_rooms():
 
                 rooms_data.append(room_data)
             except Exception as room_error:
-                print(f"Error processing room {room.id}: {str(room_error)}")
+                current_app.logger.warning("Failed to serialize room %s", room.id, exc_info=True)
                 continue
 
         return jsonify({"rooms": rooms_data})
     except Exception as e:
-        print(f"Error in api_rooms: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return error_response("Failed to load rooms", 500, e)
 
 
 @rooms_bp.route("/rooms/availability")
@@ -422,7 +559,7 @@ def api_rooms_availability():
             }
         )
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to load room availability", 500, e)
 
 
 # -----------------------------
@@ -554,7 +691,7 @@ def api_expenses():
                 )
             except Exception as e:
                 db.session.rollback()
-                return jsonify({"success": False, "message": f"Error adding expense: {str(e)}"}), 400
+                return error_response("Failed to add expense", 400, e)
 
         elif request.method == "DELETE":
             expense_id = request.args.get("id", type=int)
@@ -567,7 +704,7 @@ def api_expenses():
             return jsonify({"success": True, "message": "Expense deleted successfully!"})
 
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to load expenses", 500, e)
 
 
 @expenses_bp.route("/export_pdf/<int:year>/<int:month>")
@@ -622,7 +759,7 @@ def export_pdf(year, month):
         )
 
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to export expense report", 500, e)
 
 
 @fees_bp.route("/fees")
@@ -704,7 +841,7 @@ def api_fees():
         )
 
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to load fee records", 500, e)
 
 
 @fees_bp.route("/fees/quick-collection", methods=["GET", "POST"])
@@ -815,7 +952,7 @@ def quick_fee_collection():
 
     except Exception as e:
         db.session.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to update fee status", 500, e)
 
 
 # -----------------------------
@@ -917,7 +1054,7 @@ def api_students():
 
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": str(e)}), 500
+        return error_response("Failed to load students", 500, e)
 
 
 @students_api_bp.route("/students/<int:student_id>", methods=["PUT", "DELETE"])
@@ -936,7 +1073,7 @@ def api_update_student(student_id):
                 return jsonify({"success": True, "message": "Student deleted successfully"})
             except Exception as e:
                 db.session.rollback()
-                print(f"Error deleting student: {str(e)}")
+                current_app.logger.exception("Failed to delete student %s", student_id)
                 return jsonify({"error": "Failed to delete student due to database constraints"}), 500
 
         data = request.get_json()
@@ -963,7 +1100,7 @@ def api_update_student(student_id):
 
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": str(e)}), 500
+        return error_response("Failed to update student", 500, e)
 
 
 # Legacy (non-API) routes preserved
@@ -1015,19 +1152,31 @@ def get_students():
 
         return jsonify({"students": students_payload, "meta": meta})
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to load students", 500, e)
 
 
 @legacy_bp.route("/enroll", methods=["POST"])
 @login_required
 def enroll_student():
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        required_fields = {"name", "email", "phone", "fee", "room_id"}
+        missing_fields = [field for field in required_fields if not data.get(field)]
+        if missing_fields:
+            return jsonify({"success": False, "message": f"Missing required fields: {', '.join(missing_fields)}"}), 400
+
+        room = db.session.get(Room, int(data["room_id"]))
+        if not room:
+            return jsonify({"success": False, "message": "Selected room was not found"}), 404
+        if len(room.students) >= room.capacity:
+            return jsonify({"success": False, "message": "Selected room is already full"}), 400
+
         new_student = Student(
             name=data["name"],
             email=data["email"],
             phone=data["phone"],
-            room_number=data["room_number"],
+            fee=float(data["fee"]),
+            room_id=room.id,
             status="active",
             fee_status="unpaid",
         )
@@ -1036,7 +1185,7 @@ def enroll_student():
         return jsonify({"success": True, "message": "Student enrolled successfully"})
     except Exception as e:
         db.session.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to enroll student", 500, e)
 
 @students_api_bp.route("/students/bulk-upload", methods=["POST"])
 @login_required
@@ -1060,7 +1209,7 @@ def bulk_upload_students():
             # Read Excel into DataFrame
             df = pd.read_excel(file)
         except Exception as e:
-            return jsonify({"success": False, "message": f"Unable to read Excel file: {str(e)}"}), 400
+            return error_response("Unable to read Excel file", 400, e)
 
         # Normalize columns
         df.columns = [str(c).strip().lower() for c in df.columns]
@@ -1147,7 +1296,7 @@ def bulk_upload_students():
 
     except Exception as e:
         db.session.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to bulk upload students", 500, e)
 
 
 @students_api_bp.route("/students/download-template", methods=["GET"])
@@ -1177,7 +1326,7 @@ def download_students_template():
         output.seek(0)
         return send_file(output, as_attachment=True, download_name=filename, mimetype=mime)
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to download bulk upload template", 500, e)
         
 @legacy_bp.route("/collect-fee", methods=["POST"])
 @login_required
@@ -1218,7 +1367,7 @@ def collect_fee():
         return jsonify({"success": True, "message": "Fee collected successfully"})
     except Exception as e:
         db.session.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to collect fee", 500, e)
 
 
 @legacy_bp.route("/fee-records")
@@ -1247,7 +1396,7 @@ def get_fee_records():
             }
         )
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to load fee records", 500, e)
 
 
 # -----------------------------------
@@ -1282,7 +1431,7 @@ def get_employees():
             employee_list.append(employee_data)
         return jsonify({"success": True, "employees": employee_list})
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to load employees", 500, e)
 
 
 @employees_bp.route("/employees", methods=["POST"])
@@ -1298,7 +1447,7 @@ def add_employee():
         return jsonify({"success": True, "message": "Employee added successfully", "employee_id": employee.id})
     except Exception as e:
         db.session.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to add employee", 500, e)
 
 
 @employees_bp.route("/employees/<int:employee_id>", methods=["PUT"])
@@ -1319,7 +1468,7 @@ def update_employee(employee_id):
         return jsonify({"success": True, "message": "Employee updated successfully"})
     except Exception as e:
         db.session.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to update employee", 500, e)
 
 
 @employees_bp.route("/employees/<int:employee_id>", methods=["DELETE"])
@@ -1335,7 +1484,7 @@ def delete_employee(employee_id):
         return jsonify({"success": True, "message": "Employee deleted successfully"})
     except Exception as e:
         db.session.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to delete employee", 500, e)
 
 
 @salaries_bp.route("/employees/<int:employee_id>/salaries", methods=["GET"])
@@ -1371,7 +1520,7 @@ def get_employee_salaries(employee_id):
             }
         )
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to load salary records", 500, e)
 
 
 @salaries_bp.route("/employees/<int:employee_id>/salaries", methods=["POST"])
@@ -1411,7 +1560,7 @@ def add_salary_payment(employee_id):
         return jsonify({"success": True, "message": "Salary payment recorded successfully"})
     except Exception as e:
         db.session.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to add salary payment", 500, e)
 
 
 @salaries_bp.route("/salaries/<int:salary_id>", methods=["PUT"])
@@ -1430,7 +1579,7 @@ def update_salary_payment(salary_id):
         return jsonify({"success": True, "message": "Salary payment updated successfully"})
     except Exception as e:
         db.session.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to update salary payment", 500, e)
 
 
 @salaries_bp.route("/salaries/<int:salary_id>", methods=["DELETE"])
@@ -1449,7 +1598,7 @@ def delete_salary_payment(salary_id):
         return jsonify({"success": True, "message": "Salary payment deleted successfully"})
     except Exception as e:
         db.session.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to delete salary payment", 500, e)
 
 
 @salaries_bp.route("/salaries/summary/<month_year>", methods=["GET"])
@@ -1482,7 +1631,7 @@ def get_monthly_salary_summary(month_year):
             )
         return jsonify({"success": True, "summary": summary})
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to load monthly salary summary", 500, e)
 
 
 @salaries_bp.route("/salaries/yearly-summary/<int:year>", methods=["GET"])
@@ -1523,7 +1672,7 @@ def get_yearly_salary_summary(year):
 
         return jsonify({"success": True, "summary": summary})
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to load yearly salary summary", 500, e)
 
 
 @salaries_bp.route("/salaries/available-months", methods=["GET"])
@@ -1543,7 +1692,7 @@ def get_available_salary_months():
         available_years = [year[0] for year in years]
         return jsonify({"success": True, "available_months": available_months, "available_years": available_years})
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to load available salary months", 500, e)
 
 
 # -----------------------------
@@ -1554,10 +1703,11 @@ registration_bp = Blueprint("registration", __name__, url_prefix="/api")
 
 
 @registration_bp.route("/registration", methods=["POST"])
+@rate_limit("registration", "REGISTRATION_RATE_LIMIT")
 def submit_registration():
     """Submit a new hostel registration request (public endpoint)"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         
         # Validate required fields
         required_fields = [
@@ -1606,7 +1756,7 @@ def submit_registration():
         
     except Exception as e:
         db.session.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to submit registration", 500, e)
 
 
 @registration_bp.route("/admin/registrations", methods=["GET"])
@@ -1672,7 +1822,7 @@ def get_registrations():
         return jsonify({"registrations": registrations_data, "meta": meta})
         
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to load registrations", 500, e)
 
 
 @registration_bp.route("/admin/registrations/<int:registration_id>", methods=["PUT"])
@@ -1709,7 +1859,7 @@ def update_registration_status(registration_id):
         
     except Exception as e:
         db.session.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to update registration", 500, e)
 
 
 @registration_bp.route("/admin/registrations/<int:registration_id>", methods=["DELETE"])
@@ -1728,7 +1878,7 @@ def delete_registration(registration_id):
         
     except Exception as e:
         db.session.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to delete registration", 500, e)
 
 
 @registration_bp.route("/admin/registrations/stats", methods=["GET"])
@@ -1759,7 +1909,7 @@ def get_registration_stats():
         })
         
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
+        return error_response("Failed to load registration stats", 500, e)
 
 
 # -----------------------------
@@ -1768,6 +1918,7 @@ def get_registration_stats():
 
 if __name__ == "__main__":
     app = create_app()
-    with app.app_context():
-        bootstrap_data()
-    app.run(debug=True, port=5051)
+    app.run(
+        debug=app.config["FLASK_ENV"] != "production",
+        port=int(os.environ.get("PORT", "5051")),
+    )

@@ -4,9 +4,9 @@
 - Local backend: `http://localhost:5051`
 
 ## Auth Model
-- Authentication is session-cookie based (`Flask-Login`).
-- Frontend calls protected endpoints with `withCredentials: true`.
-- Most business endpoints require an authenticated admin session.
+- Authentication is bearer-token based.
+- `POST /login` returns a `token` that must be sent as `Authorization: Bearer <token>`.
+- Most business endpoints require an authenticated admin token.
 
 ## Response Conventions
 - Success responses often return `success: true` and payload fields.
@@ -19,9 +19,9 @@
 | GET | `/` | API root check |
 | GET | `/test` | Basic test endpoint |
 | GET | `/health` | Health check |
-| GET | `/api/csrf-token` | Returns CSRF token |
+| GET | `/api/csrf-token` | Compatibility endpoint |
 | POST | `/login` | Admin login |
-| GET | `/check-auth` | Current auth/session check |
+| GET | `/check-auth` | Current auth/token check |
 | POST | `/api/registration` | Public hostel registration submission |
 
 ### `POST /login`
@@ -41,7 +41,9 @@ Success response:
     "name": "System Admin",
     "email": "admin@example.com",
     "username": "admin"
-  }
+  },
+  "token": "eyJ...",
+  "expires_in": 43200
 }
 ```
 
@@ -64,7 +66,7 @@ Optional field:
 Success returns `201` with `registration_id`.
 
 ## Protected Endpoints
-All endpoints below require a logged-in admin session.
+All endpoints below require a logged-in admin token.
 
 | Method | Path | Description |
 |---|---|---|
@@ -206,12 +208,12 @@ These are still present but are not the preferred interface for new clients.
 | POST | `/collect-fee` | Legacy fee collect |
 | GET | `/fee-records` | Legacy fee records list |
 
-## Curl Example (Session Login + Protected Call)
+## Curl Example (Bearer Login + Protected Call)
 ```bash
-curl -i -c cookies.txt \
+TOKEN=$(curl -s \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"secret"}' \
-  http://localhost:5051/login
+  http://localhost:5051/login | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
 
-curl -b cookies.txt http://localhost:5051/api/dashboard
+curl -H "Authorization: Bearer ${TOKEN}" http://localhost:5051/api/dashboard
 ```

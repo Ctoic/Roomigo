@@ -25,6 +25,7 @@ import { Label } from '../components/ui/label';
 import { Textarea } from '../components/ui/textarea';
 import Layout from '../components/Layout';
 import { useAuth } from '../context/AuthContext';
+import { apiFetch } from '@/lib/api';
 
 interface Registration {
   id: number;
@@ -83,12 +84,7 @@ export default function Registrations() {
   const fetchRegistrations = async () => {
     try {
       setLoadingData(true);
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/admin/registrations?page=${currentPage}&status=${statusFilter}`,
-        {
-          credentials: 'include',
-        }
-      );
+      const response = await apiFetch(`/api/admin/registrations?page=${currentPage}&status=${statusFilter}`);
       const data = await response.json();
       setRegistrations(data.registrations);
       setTotalPages(data.meta.total_pages);
@@ -101,9 +97,7 @@ export default function Registrations() {
 
   const fetchStats = async () => {
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/admin/registrations/stats`, {
-        credentials: 'include',
-      });
+      const response = await apiFetch('/api/admin/registrations/stats');
       const data = await response.json();
       setStats(data);
     } catch (error) {
@@ -114,12 +108,11 @@ export default function Registrations() {
   const updateRegistrationStatus = async (id: number, status: string, notes?: string) => {
     try {
       setUpdating(id);
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/admin/registrations/${id}`, {
+      const response = await apiFetch(`/api/admin/registrations/${id}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
         },
-        credentials: 'include',
         body: JSON.stringify({ status, admin_notes: notes }),
       });
 
@@ -140,9 +133,8 @@ export default function Registrations() {
     if (!confirm('Are you sure you want to delete this registration?')) return;
     
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/admin/registrations/${id}`, {
+      const response = await apiFetch(`/api/admin/registrations/${id}`, {
         method: 'DELETE',
-        credentials: 'include',
       });
 
       if (response.ok) {

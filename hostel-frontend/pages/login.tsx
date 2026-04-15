@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/router';
 import toast from 'react-hot-toast';
-import axios from 'axios';
+import { apiClient } from '@/lib/api';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -15,10 +15,8 @@ export default function Login() {
     e.preventDefault();
     setLoading(true);
     try {
-      // First, try to directly check if the backend is accessible 
       try {
-        await axios.get(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/`);
-        console.log('Backend is accessible');
+        await apiClient.get('/');
       } catch (error) {
         console.error('Backend connection error:', error);
         toast.error('Cannot connect to the server. Please ensure the backend is running.');
@@ -26,8 +24,6 @@ export default function Login() {
         return;
       }
 
-      // Then attempt login
-      console.log('Attempting login with:', { username });
       await login(username, password);
       toast.success('Login successful!');
       router.push('/dashboard');

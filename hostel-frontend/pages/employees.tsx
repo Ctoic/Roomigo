@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import Layout from '@/components/Layout';
 import { useAuth } from '@/context/AuthContext';
+import { apiClient } from '@/lib/api';
 import { useRouter } from 'next/router';
-import axios from 'axios';
 
 interface Employee {
   id: number;
@@ -71,9 +71,7 @@ export default function Employees() {
 
   const fetchEmployees = async () => {
     try {
-      const response = await axios.get(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/employees`, {
-        withCredentials: true
-      });
+      const response = await apiClient.get('/api/employees');
       const data = response.data as { success: boolean; employees: Employee[] };
       if (data.success) {
         setEmployees(data.employees);
@@ -92,9 +90,7 @@ export default function Employees() {
 
   const fetchSalaryRecords = async (employeeId: number) => {
     try {
-      const response = await axios.get(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/employees/${employeeId}/salaries`, {
-        withCredentials: true
-      });
+      const response = await apiClient.get(`/api/employees/${employeeId}/salaries`);
       const data = response.data as { success: boolean; salary_records: SalaryRecord[] };
       if (data.success) {
         setSalaryRecords(data.salary_records);
@@ -109,9 +105,7 @@ export default function Employees() {
 
   const fetchAvailableMonths = async () => {
     try {
-      const response = await axios.get(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/salaries/available-months`, {
-        withCredentials: true
-      });
+      const response = await apiClient.get('/api/salaries/available-months');
       const data = response.data as { success: boolean; available_months: string[]; available_years: string[] };
       if (data.success) {
         setAvailableMonths(data.available_months);
@@ -159,9 +153,7 @@ export default function Employees() {
   const handleAddEmployee = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const response = await axios.post(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/employees`, newEmployee, {
-        withCredentials: true
-      });
+      const response = await apiClient.post('/api/employees', newEmployee);
       const data = response.data as { success: boolean; message: string; employee_id?: number };
       
       if (data.success) {
@@ -181,11 +173,7 @@ export default function Employees() {
     if (!selectedEmployee) return;
 
     try {
-      const response = await axios.post(
-        `${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/employees/${selectedEmployee.id}/salaries`,
-        newSalary,
-        { withCredentials: true }
-      );
+      const response = await apiClient.post(`/api/employees/${selectedEmployee.id}/salaries`, newSalary);
       const data = response.data as { success: boolean; message: string };
       
       if (data.success) {
@@ -208,9 +196,7 @@ export default function Employees() {
     if (!confirm('Are you sure you want to delete this employee?')) return;
 
     try {
-      const response = await axios.delete(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/employees/${employeeId}`, {
-        withCredentials: true
-      });
+      const response = await apiClient.delete(`/api/employees/${employeeId}`);
       const data = response.data as { success: boolean; message: string };
       
       if (data.success) {
@@ -227,9 +213,7 @@ export default function Employees() {
     if (!confirm('Are you sure you want to delete this salary record?')) return;
 
     try {
-      const response = await axios.delete(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/salaries/${salaryId}`, {
-        withCredentials: true
-      });
+      const response = await apiClient.delete(`/api/salaries/${salaryId}`);
       const data = response.data as { success: boolean; message: string };
       
       if (data.success) {

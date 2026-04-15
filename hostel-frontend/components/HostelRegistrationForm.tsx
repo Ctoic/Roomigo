@@ -6,6 +6,7 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Textarea } from './ui/textarea';
 import { CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
+import { apiFetch } from '@/lib/api';
 
 interface RegistrationFormData {
   name: string;
@@ -58,27 +59,20 @@ export default function HostelRegistrationForm() {
     e.preventDefault();
     setSubmissionState({ status: 'submitting', message: '' });
 
-    console.log('Submitting registration with data:', formData);
-
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051'}/api/registration`, {
+      const response = await apiFetch('/api/registration', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        credentials: 'include',
         body: JSON.stringify(formData),
       });
-
-      console.log('Response status:', response.status);
-      console.log('Response headers:', response.headers);
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
       const result = await response.json();
-      console.log('Response data:', result);
 
       if (result.success) {
         setSubmissionState({

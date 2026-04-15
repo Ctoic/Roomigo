@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import Layout from '@/components/Layout';
 import { useAuth } from '@/context/AuthContext';
+import { apiClient } from '@/lib/api';
 import { useRouter } from 'next/router';
-import axios from 'axios';
 import toast from 'react-hot-toast';
 import { Line } from 'react-chartjs-2';
 import {
@@ -54,8 +54,6 @@ interface ExpenseMutationResponse {
   message?: string;
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051';
-
 export default function Expenses() {
   const { isAuthenticated, loading: authLoading } = useAuth();
   const router = useRouter();
@@ -97,15 +95,7 @@ export default function Expenses() {
   const fetchExpenses = async () => {
     try {
       setIsLoading(true);
-      const { data } = await axios.get<ExpenseData>(
-        `${API_BASE_URL}/api/expenses?month=${selectedMonth}&year=${selectedYear}`,
-        {
-          withCredentials: true,
-          headers: {
-            Accept: 'application/json',
-          },
-        }
-      );
+      const { data } = await apiClient.get<ExpenseData>(`/api/expenses?month=${selectedMonth}&year=${selectedYear}`);
       setExpenseData(data ?? null);
     } catch (error) {
       console.error('Error fetching expenses:', error);
@@ -117,13 +107,9 @@ export default function Expenses() {
 
   const handleDownloadReport = async () => {
     try {
-      const { data } = await axios.get<ArrayBuffer>(
-        `${API_BASE_URL}/api/export_pdf/${selectedYear}/${selectedMonth}`,
-        {
-          withCredentials: true,
-          responseType: 'arraybuffer'
-        }
-      );
+      const { data } = await apiClient.get<ArrayBuffer>(`/api/export_pdf/${selectedYear}/${selectedMonth}`, {
+        responseType: 'arraybuffer'
+      });
       
       // Create a blob from the PDF data
       const blob = new Blob([data], { type: 'application/pdf' });
@@ -157,19 +143,7 @@ export default function Expenses() {
         date: formData.date
       };
 
-      console.log('Submitting formatted data:', formattedData);
-
-      const { data } = await axios.post<ExpenseMutationResponse>(
-        `${API_BASE_URL}/api/expenses`,
-        formattedData,
-        {
-          withCredentials: true,
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-        }
-      );
+      const { data } = await apiClient.post<ExpenseMutationResponse>('/api/expenses', formattedData);
       
       if (data.success) {
         toast.success(data.message || 'Expense added successfully');
@@ -193,15 +167,7 @@ export default function Expenses() {
   const handleDelete = async (id: number) => {
     if (window.confirm('Are you sure you want to delete this expense?')) {
       try {
-        const { data } = await axios.delete<ExpenseMutationResponse>(
-          `${API_BASE_URL}/api/expenses?id=${id}`,
-          {
-            withCredentials: true,
-            headers: {
-              Accept: 'application/json',
-            },
-          }
-        );
+        const { data } = await apiClient.delete<ExpenseMutationResponse>(`/api/expenses?id=${id}`);
         
         if (data.success) {
           toast.success(data.message || 'Expense deleted successfully');

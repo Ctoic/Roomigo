@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import axios from 'axios';
 import { useRouter } from 'next/router';
+import { apiClient, getStoredAuthToken, persistAuthToken } from '@/lib/api';
 
 interface User {
   id: number;
@@ -20,9 +20,8 @@ interface AuthContextType {
 interface AuthResponse {
   user?: User;
   message?: string;
+  token?: string;
 }
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051';
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -32,17 +31,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
 
   useEffect(() => {
-    // Check if user is logged in on mount
     const checkAuth = async () => {
+      const token = getStoredAuthToken();
+      if (!token) {
+        setLoading(false);
+        return;
+      }
+
       try {
-        const { data } = await axios.get<AuthResponse>(`${API_BASE_URL}/check-auth`, {
-          withCredentials: true
-        });
+        const { data } = await apiClient.get<AuthResponse>('/check-auth');
         if (data.user) {
           setUser(data.user);
         }
       } catch (error) {
         console.error('Auth check failed:', error);
+        persistAuthToken(null);
       } finally {
         setLoading(false);
       }
@@ -53,24 +56,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (username: string, password: string) => {
     try {
-      console.log('Attempting login to:', `${API_BASE_URL}/login`);
-      const { data } = await axios.post<AuthResponse>(`${API_BASE_URL}/login`, {
+      const { data } = await apiClient.post<AuthResponse>('/login', {
         username,
         password
-      }, {
-        withCredentials: true,
-        headers: {
-          'Content-Type': 'application/json'
-        }
       });
-      
-      console.log('Login response:', data);
-      
-      if (data.user) {
+
+      if (data.user && data.token) {
+        persistAuthToken(data.token);
         setUser(data.user);
         router.push('/dashboard');
       } else {
-        throw new Error('No user data in response');
+        throw new Error(data.message || 'Authentication token missing from response');
       }
     } catch (error: any) {
       console.error('Login error details:', error.response?.data || error.message);
@@ -80,13 +76,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     try {
-      await axios.post(`${API_BASE_URL}/logout`, {}, {
-        withCredentials: true
-      });
-      setUser(null);
-      router.push('/login');
+      await apiClient.post('/logout');
     } catch (error) {
       console.error('Logout failed:', error);
+    } finally {
+      persistAuthToken(null);
+      setUser(null);
+      router.push('/login');
     }
   };
 

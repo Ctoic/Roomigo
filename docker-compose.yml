@@ -5,14 +5,14 @@ services:
       dockerfile: Dockerfile.backend
     environment:
       FLASK_APP: app:create_app
-      FLASK_ENV: production
+      FLASK_ENV: development
       PORT: 5051
       DATABASE_URL: ${DATABASE_URL:-sqlite:////data/hostel.db}
-      SECRET_KEY: ${SECRET_KEY:-change-me}
-      WTF_CSRF_SECRET_KEY: ${WTF_CSRF_SECRET_KEY:-change-me-too}
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key}
       UPLOAD_FOLDER: static/uploads
+      RUN_SEED_DATA: "true"
     command: >
-      sh -c "FLASK_SKIP_BOOTSTRAP=1 flask db upgrade && gunicorn --bind 0.0.0.0:5051 'app:create_app()'"
+      sh -c "flask db upgrade && gunicorn --bind 0.0.0.0:5051 'app:create_app()'"
     volumes:
       - backend-data:/data
       - uploads:/app/static/uploads
@@ -26,7 +26,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
-      NEXT_PUBLIC_API_BASE_URL: http://backend:5051
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:5051
     command: >
       sh -c "npm run build && npm start"
     ports:

@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import Layout from '@/components/Layout';
 import { useAuth } from '@/context/AuthContext';
+import { apiClient } from '@/lib/api';
 import { useRouter } from 'next/router';
-import axios from 'axios';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -81,8 +81,6 @@ interface RoomsAvailability {
   types?: { type?: string; name?: string; available?: number; total?: number }[];
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:5051';
-
 export default function Dashboard() {
   const { isAuthenticated, loading } = useAuth();
   const router = useRouter();
@@ -102,21 +100,15 @@ export default function Dashboard() {
       
       setIsLoading(true);
       try {
-        const { data: baseData } = await axios.get<DashboardData>(
-          `${API_BASE_URL}/api/dashboard`,
-          {
-            withCredentials: true,
-          }
+        const { data: baseData } = await apiClient.get<DashboardData>(
+          '/api/dashboard'
         );
         setDashboardData(baseData ?? defaultDashboardData);
 
         // Try to augment with rooms availability (optional endpoint)
         try {
-          const { data: roomsRaw } = await axios.get<RoomsAvailability>(
-            `${API_BASE_URL}/api/rooms/availability`,
-            {
-              withCredentials: true,
-            }
+          const { data: roomsRaw } = await apiClient.get<RoomsAvailability>(
+            '/api/rooms/availability'
           );
           const raw: RoomsAvailability = roomsRaw || {};
 
